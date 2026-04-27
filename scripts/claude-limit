@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMAND="${1:-status}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-claude-limit"
+CACHE_JSON="$CACHE_DIR/usage.json"
+CACHE_STATUS="$CACHE_DIR/status"
+CREDENTIALS="${CLAUDE_LIMIT_CREDENTIALS:-$HOME/.claude/.credentials.json}"
+USAGE_URL="${CLAUDE_LIMIT_USAGE_URL:-https://api.anthropic.com/api/oauth/usage}"
+
+resolve_user_agent() {
+  if [ -n "${CLAUDE_LIMIT_USER_AGENT:-}" ]; then
+    printf '%s\n' "$CLAUDE_LIMIT_USER_AGENT"
+    return
+  fi
+  local version
+  version="$(claude --version 2>/dev/null | awk '{print $1}')"
+  if [ -z "$version" ]; then
+    version="unknown"
+  fi
+  printf 'claude-code/%s\n' "$version"
+}
+
+if ! mkdir -p "$CACHE_DIR" 2>/dev/null; then
+  CACHE_DIR="/tmp/tmux-claude-limit-${UID:-$(id -u)}"
+  CACHE_JSON="$CACHE_DIR/usage.json"
+  CACHE_STATUS="$CACHE_DIR/status"
+  mkdir -p "$CACHE_DIR"
+fi
+
+tmux_get() {
+  local option="$1"
+  local default="$2"
+  if command -v tmux >/dev/null 2>&1 && [ -n "${TMUX:-}" ]; then
+    local value
+    value="$(tmux show-option -gqv "$option" 2>/dev/null || true)"
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+      return
+    fi
+  fi
+  printf '%s\n' "$default"
+}
+
+is_on() {
+  case "$1" in
+    on|yes|true|1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cache_age() {
+  if [ ! -s "$CACHE_JSON" ]; then
+    printf '999999\n'
+    return
+  fi
+  local now mtime
+  now="$(date +%s)"
+  mtime="$(stat -c %Y "$CACHE_JSON" 2>/dev/null || stat -f %m "$CACHE_JSON" 2>/dev/null || printf '0')"
+  printf '%s\n' "$((now - mtime))"
+}
+
+fetch_usage() {
+  node - "$CREDENTIALS" "$USAGE_URL" "$(resolve_user_agent)" <<'NODE'
+const fs = require("fs");
+const https = require("https");
+
+const [credentialsPath, usageUrl, userAgent] = process.argv.slice(2);
+
+let credentials;
+try {
+  credentials = JSON.parse(fs.readFileSync(credentialsPath, "utf8"));
+} catch (error) {
+  console.error(`cannot read ${credentialsPath}`);
+  process.exit(2);
+}
+
+const token = credentials.claudeAiOauth && credentials.claudeAiOauth.accessToken;
+if (!token) {
+  console.error("missing claudeAiOauth.accessToken");
+  process.exit(2);
+}
+
+const request = https.request(usageUrl, {
+  headers: {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${token}`,
+    "anthropic-beta": "oauth-2025-04-20",
+    "User-Agent": userAgent,
+  },
+}, (response) => {
+  let body = "";
+  response.on("data", (chunk) => body += chunk);
+  response.on("end", () => {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      console.error(`usage endpoint returned HTTP ${response.statusCode}`);
+      process.exit(1);
+    }
+    JSON.parse(body);
+    process.stdout.write(body);
+  });
+});
+
+request.setTimeout(7000, () => {
+  request.destroy(new Error("usage endpoint timeout"));
+});
+request.on("error", (error) => {
+  console.error(error.message);
+  process.exit(1);
+});
+request.end();
+NODE
+}
+
+refresh_cache_if_needed() {
+  local ttl age tmp err
+  ttl="$(tmux_get '@claude_limit_cache_ttl' '60')"
+  age="$(cache_age)"
+  if [ "$age" -lt "$ttl" ]; then
+    return 0
+  fi
+
+  tmp="$CACHE_JSON.tmp.$$"
+  err="$CACHE_DIR/error.$$"
+  if fetch_usage >"$tmp" 2>"$err"; then
+    mv "$tmp" "$CACHE_JSON"
+    rm -f "$err"
+    date +%s >"$CACHE_DIR/last_success"
+    return 0
+  fi
+
+  rm -f "$tmp"
+  cat "$err" >"$CACHE_DIR/last_error" 2>/dev/null || true
+  rm -f "$err"
+  return 1
+}
+
+render_status() {
+  local stale=0
+  if ! refresh_cache_if_needed; then
+    stale=1
+  fi
+
+  if [ ! -s "$CACHE_JSON" ]; then
+    local style_error
+    style_error="$(tmux_get '@claude_limit_style_error' 'fg=red,bold')"
+    printf '#[%s]Claude: unavailable#[default]' "$style_error"
+    return
+  fi
+
+  node - "$CACHE_JSON" "$stale" \
+    "$(tmux_get '@claude_limit_show_five_hour' 'on')" \
+    "$(tmux_get '@claude_limit_show_seven_day' 'on')" \
+    "$(tmux_get '@claude_limit_show_extra' 'on')" \
+    "$(tmux_get '@claude_limit_show_reset' 'on')" \
+    "$(tmux_get '@claude_limit_show_stale' 'on')" \
+    "$(tmux_get '@claude_limit_label' 'Claude')" \
+    "$(tmux_get '@claude_limit_separator' ' ')" \
+    "$(tmux_get '@claude_limit_time_format' '%H:%M')" \
+    "$(tmux_get '@claude_limit_style_low' 'fg=green')" \
+    "$(tmux_get '@claude_limit_style_mid' 'fg=yellow')" \
+    "$(tmux_get '@claude_limit_style_high' 'fg=red,bold')" \
+    "$(tmux_get '@claude_limit_threshold_mid' '70')" \
+    "$(tmux_get '@claude_limit_threshold_high' '90')" <<'NODE'
+const fs = require("fs");
+const [
+  file, stale, show5h, show7d, showExtra, showReset, showStale,
+  label, separator, timeFormat, styleLow, styleMid, styleHigh,
+  thresholdMid, thresholdHigh,
+] = process.argv.slice(2);
+
+const data = JSON.parse(fs.readFileSync(file, "utf8"));
+const on = (value) => ["on", "yes", "true", "1"].includes(String(value).toLowerCase());
+const max = (...values) => Math.max(...values.filter((value) => Number.isFinite(value)));
+const pct = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value)) : null;
+const tmuxStyle = (usage) => {
+  if (usage >= Number(thresholdHigh)) return styleHigh;
+  if (usage >= Number(thresholdMid)) return styleMid;
+  return styleLow;
+};
+const formatDate = (value) => {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  if (timeFormat === "%H:%M") return `${hh}:${mm}`;
+  return date.toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+};
+const parts = [];
+const usages = [];
+
+const fmtReset = (resetsAt) => on(showReset) ? ` (${formatDate(resetsAt)})` : "";
+const fmtCredits = (used, limit, currency) => {
+  const sym = currency === "USD" ? "$" : "";
+  const short = (n) => {
+    if (n < 1000) return `${n}`;
+    if (n % 1000 === 0) return `${n / 1000}k`;
+    return `${(n / 1000).toFixed(1)}k`;
+  };
+  return `${sym}${short(used)}/${sym}${short(limit)}`;
+};
+
+if (on(show5h) && data.five_hour) {
+  const used = pct(data.five_hour.utilization);
+  if (used !== null) {
+    usages.push(used);
+    parts.push(`5h ${used}%${fmtReset(data.five_hour.resets_at)}`);
+  }
+}
+
+if (on(show7d) && data.seven_day) {
+  const used = pct(data.seven_day.utilization);
+  if (used !== null) {
+    usages.push(used);
+    parts.push(`7d ${used}%${fmtReset(data.seven_day.resets_at)}`);
+  }
+}
+
+if (on(showExtra) && data.extra_usage && data.extra_usage.is_enabled) {
+  const used = pct(data.extra_usage.utilization);
+  if (used !== null) {
+    usages.push(used);
+    const credits = fmtCredits(data.extra_usage.used_credits, data.extra_usage.monthly_limit, data.extra_usage.currency);
+    parts.push(`$${used}% (${credits})`);
+  }
+}
+
+if (!parts.length) {
+  parts.push("no usage");
+}
+
+const suffix = on(showStale) && stale === "1" ? " ~" : "";
+const style = tmuxStyle(max(...usages, 0));
+const labelPart = label ? `${label} ` : "";
+process.stdout.write(`#[${style}]${labelPart}${parts.join(separator)}${suffix}#[default]`);
+NODE
+}
+
+render_panel() {
+  refresh_cache_if_needed || true
+  if [ ! -s "$CACHE_JSON" ]; then
+    printf 'Claude usage unavailable\n\n'
+    if [ -f "$CACHE_DIR/last_error" ]; then
+      cat "$CACHE_DIR/last_error"
+    fi
+    return
+  fi
+
+  node - "$CACHE_JSON" "$(cache_age)" <<'NODE'
+const fs = require("fs");
+const [file, age] = process.argv.slice(2);
+const data = JSON.parse(fs.readFileSync(file, "utf8"));
+const fmt = (value) => {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleString();
+};
+const line = (name, window) => {
+  if (!window) return `${name.padEnd(12)} --`;
+  return `${name.padEnd(12)} ${Math.round(window.utilization)}%  resets ${fmt(window.resets_at)}`;
+};
+console.log("Claude Usage");
+console.log("============");
+console.log(line("5-hour", data.five_hour));
+console.log(line("7-day", data.seven_day));
+if (data.seven_day_sonnet) console.log(line("7d sonnet", data.seven_day_sonnet));
+if (data.seven_day_opus) console.log(line("7d opus", data.seven_day_opus));
+if (data.extra_usage) {
+  console.log("");
+  console.log("Extra usage");
+  console.log(`enabled      ${data.extra_usage.is_enabled ? "yes" : "no"}`);
+  console.log(`used         ${data.extra_usage.used_credits}/${data.extra_usage.monthly_limit} ${data.extra_usage.currency || ""}`);
+  console.log(`utilization  ${data.extra_usage.utilization.toFixed(1)}%`);
+}
+console.log("");
+console.log(`cache age    ${age}s`);
+console.log("");
+console.log("press q to quit");
+NODE
+}
+
+case "$COMMAND" in
+  status)
+    render_status
+    ;;
+  panel|popup)
+    render_panel
+    ;;
+  raw)
+    refresh_cache_if_needed || true
+    if [ -s "$CACHE_JSON" ]; then
+      cat "$CACHE_JSON"
+    else
+      exit 1
+    fi
+    ;;
+  *)
+    printf 'usage: %s [status|panel|raw]\n' "$0" >&2
+    exit 2
+    ;;
+esac
