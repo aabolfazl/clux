@@ -85,12 +85,8 @@ All options are tmux user options — set them before the loader runs.
 | `@claude_limit_label`                 | `Claude`      | Prefix label; set `''` to drop                              |
 | `@claude_limit_separator`             | ` · `         | Between buckets                                             |
 | `@claude_limit_time_format`           | `%H:%M`       | Reset-time format                                           |
-| `@claude_limit_style_low`             | `fg=black`    | tmux style for usage below `threshold_mid`                  |
-| `@claude_limit_style_mid`             | `fg=red,bold` | Style for usage at or above `threshold_mid`                 |
-| `@claude_limit_style_high`            | `fg=brightred,bold,reverse` | Style for usage at or above `threshold_high`     |
-| `@claude_limit_style_error`           | `fg=brightred,bold,reverse` | Style for unavailable / fetch-failed state       |
-| `@claude_limit_threshold_mid`         | `70`          | Percent — switch to `style_mid` at/above                    |
-| `@claude_limit_threshold_high`        | `90`          | Percent — switch to `style_high` at/above                   |
+| `@claude_limit_style`                 | `fg=black`    | tmux style applied to the whole segment                     |
+| `@claude_limit_style_error`           | `fg=red,bold` | Style for unavailable / fetch-failed state                  |
 | `@claude_limit_popup_key`             | `u`           | Key bound to the popup (with `prefix`)                      |
 | `@claude_limit_bind_popup`            | `on`          | Set `off` to skip the popup keybind                         |
 
@@ -98,15 +94,12 @@ All options are tmux user options — set them before the loader runs.
 
 tmux's `bg=default` inherits the `status-style` background, not the terminal
 background. So if your status bar has e.g. `bg=green` and you set
-`fg=green`, you get green-on-green = invisible. Defaults pick foregrounds that
-contrast on most themes (`fg=black` for low, `fg=red,bold` for warning,
-`reverse` for danger), but if you have a dark status bar you'll likely want
-something like:
+`fg=green`, you get green-on-green = invisible. The default `fg=black,bold`
+reads on most light/themed bars; on a dark status bar you'll want something
+like:
 
 ```tmux
-set -g @claude_limit_style_low  'fg=white'
-set -g @claude_limit_style_mid  'fg=yellow,bold'
-set -g @claude_limit_style_high 'fg=red,bold,reverse'
+set -g @claude_limit_style 'fg=white,bold'
 ```
 
 ## Popup

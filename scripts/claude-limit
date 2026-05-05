@@ -158,27 +158,16 @@ render_status() {
     "$(tmux_get '@claude_limit_label' 'Claude')" \
     "$(tmux_get '@claude_limit_separator' ' ')" \
     "$(tmux_get '@claude_limit_time_format' '%H:%M')" \
-    "$(tmux_get '@claude_limit_style_low' 'fg=green')" \
-    "$(tmux_get '@claude_limit_style_mid' 'fg=yellow')" \
-    "$(tmux_get '@claude_limit_style_high' 'fg=red,bold')" \
-    "$(tmux_get '@claude_limit_threshold_mid' '70')" \
-    "$(tmux_get '@claude_limit_threshold_high' '90')" <<'NODE'
+    "$(tmux_get '@claude_limit_style' 'fg=black')" <<'NODE'
 const fs = require("fs");
 const [
   file, stale, show5h, show7d, showExtra, showReset, showStale,
-  label, separator, timeFormat, styleLow, styleMid, styleHigh,
-  thresholdMid, thresholdHigh,
+  label, separator, timeFormat, style,
 ] = process.argv.slice(2);
 
 const data = JSON.parse(fs.readFileSync(file, "utf8"));
 const on = (value) => ["on", "yes", "true", "1"].includes(String(value).toLowerCase());
-const max = (...values) => Math.max(...values.filter((value) => Number.isFinite(value)));
 const pct = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value)) : null;
-const tmuxStyle = (usage) => {
-  if (usage >= Number(thresholdHigh)) return styleHigh;
-  if (usage >= Number(thresholdMid)) return styleMid;
-  return styleLow;
-};
 const formatDate = (value) => {
   if (!value) return "--";
   const date = new Date(value);
@@ -189,7 +178,6 @@ const formatDate = (value) => {
   return date.toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
 };
 const parts = [];
-const usages = [];
 
 const fmtReset = (resetsAt) => on(showReset) ? ` (${formatDate(resetsAt)})` : "";
 const fmtCredits = (used, limit, currency) => {
@@ -205,7 +193,6 @@ const fmtCredits = (used, limit, currency) => {
 if (on(show5h) && data.five_hour) {
   const used = pct(data.five_hour.utilization);
   if (used !== null) {
-    usages.push(used);
     parts.push(`5h ${used}%${fmtReset(data.five_hour.resets_at)}`);
   }
 }
@@ -213,7 +200,6 @@ if (on(show5h) && data.five_hour) {
 if (on(show7d) && data.seven_day) {
   const used = pct(data.seven_day.utilization);
   if (used !== null) {
-    usages.push(used);
     parts.push(`7d ${used}%${fmtReset(data.seven_day.resets_at)}`);
   }
 }
@@ -221,7 +207,6 @@ if (on(show7d) && data.seven_day) {
 if (on(showExtra) && data.extra_usage && data.extra_usage.is_enabled) {
   const used = pct(data.extra_usage.utilization);
   if (used !== null) {
-    usages.push(used);
     const credits = fmtCredits(data.extra_usage.used_credits, data.extra_usage.monthly_limit, data.extra_usage.currency);
     parts.push(`$${used}% (${credits})`);
   }
@@ -232,7 +217,6 @@ if (!parts.length) {
 }
 
 const suffix = on(showStale) && stale === "1" ? " ~" : "";
-const style = tmuxStyle(max(...usages, 0));
 const labelPart = label ? `${label} ` : "";
 process.stdout.write(`#[${style}]${labelPart}${parts.join(separator)}${suffix}#[default]`);
 NODE

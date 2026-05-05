@@ -34,16 +34,11 @@ set_default '@claude_limit_show_stale' 'on'
 set_default '@claude_limit_label' 'Claude'
 set_default '@claude_limit_separator' ' · '
 set_default '@claude_limit_time_format' '%H:%M'
-# Note on styles: tmux's `bg=default` inherits status-style bg, so on a themed
-# status bar (e.g. status-style 'bg=green,fg=black') 'fg=green' becomes
-# invisible. Defaults below use only fg + bold so they read on most themes;
-# override per-bar to suit your colors.
-set_default '@claude_limit_style_low' 'fg=black,bold'
-set_default '@claude_limit_style_mid' 'fg=red,bold'
-set_default '@claude_limit_style_high' 'fg=brightred,bold,reverse'
-set_default '@claude_limit_style_error' 'fg=brightred,bold,reverse'
-set_default '@claude_limit_threshold_mid' '70'
-set_default '@claude_limit_threshold_high' '90'
+# Single style applied to the whole segment. tmux's `bg=default` inherits
+# status-style bg, so on a themed status bar (e.g. 'bg=green,fg=black')
+# 'fg=green' becomes invisible — override per-bar to suit your colors.
+set_default '@claude_limit_style' 'fg=black'
+set_default '@claude_limit_style_error' 'fg=red,bold'
 # Default to lowercase 'u' so we don't shadow TPM's `prefix + U` (update).
 set_default '@claude_limit_popup_key' 'u'
 set_default '@claude_limit_bind_popup' 'on'
